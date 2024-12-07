@@ -9,13 +9,15 @@ def fix_perspective(image: np.ndarray) -> np.ndarray:
         blur_image, 0, 255, cv2.THRESH_BINARY+cv2.THRESH_OTSU)[1]
 
     # Apply morphology
-    kernel = np.ones((7, 7), np.uint8)
-    morph = cv2.morphologyEx(threshold_image, cv2.MORPH_CLOSE, kernel)
-    morph = cv2.morphologyEx(morph, cv2.MORPH_OPEN, kernel)
+    kernel = np.ones((5, 5), np.uint8)
+    morphology_image = cv2.morphologyEx(
+        threshold_image, cv2.MORPH_CLOSE, kernel)
+    morphology_image = cv2.morphologyEx(
+        morphology_image, cv2.MORPH_OPEN, kernel)
 
     # Get largest contour
     contours = cv2.findContours(
-        morph, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        morphology_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contours = contours[0] if len(contours) == 2 else contours[1]
     area_thresh = 0
     for c in contours:
@@ -33,47 +35,81 @@ def fix_perspective(image: np.ndarray) -> np.ndarray:
     corners = cv2.approxPolyDP(big_contour, 0.04 * peri, True)
 
     # Draw polygon on input image from detected corners
-    polygon = image.copy()
-    cv2.polylines(polygon, [corners], True, (0, 0, 255), 1, cv2.LINE_AA)
+    polygon_image = image.copy()
+    cv2.polylines(polygon_image, [corners], True, (0, 0, 255), 1, cv2.LINE_AA)
     # cv2.drawContours(page,[corners],0,(0,0,255),1)
 
     print(len(corners))
     print(corners)
 
-    # For simplicity get average of top/bottom side widths and average of left/right side heights
-    # note: probably better to get average of horizontal lengths and of vertical lengths
-    width = 0.5*((corners[0][0][0] - corners[1][0][0]) +
-                 (corners[3][0][0] - corners[2][0][0]))
-    height = 0.5*((corners[2][0][1] - corners[1][0][1]) +
-                  (corners[3][0][1] - corners[0][0][1]))
-    width = int(width)
-    height = int(height)
+    # Reformat corners to a 2D array and sort them
+    icorners = np.array([corner[0]
+                        for corner in corners])  # Extract (x, y) pairs
+    sorted_corners = __order_points(icorners)
 
-    # Reformat input corners to x,y list
-    icorners = []
-    for corner in corners:
-        pt = [corner[0][0], corner[0][1]]
-        icorners.append(pt)
-    icorners = np.float32(icorners)
+    # Calculate width as the average of the top and bottom sides
+    # Top: distance between top-left and top-right
+    top_width = np.linalg.norm(sorted_corners[1] - sorted_corners[0])
+    # Bottom: distance between bottom-left and bottom-right
+    bottom_width = np.linalg.norm(sorted_corners[2] - sorted_corners[3])
+    width = int((top_width + bottom_width) / 2)
 
-    # Get corresponding output corners from width and height
-    ocorners = [[width, 0], [0, 0], [0, height], [width, height]]
-    ocorners = np.float32(ocorners)
+    # Calculate height as the average of the left and right sides
+    # Left: distance between top-left and bottom-left
+    left_height = np.linalg.norm(sorted_corners[3] - sorted_corners[0])
+    # Right: distance between top-right and bottom-right
+    right_height = np.linalg.norm(sorted_corners[2] - sorted_corners[1])
+    height = int((left_height + right_height) / 2)
 
-    # Get perspective tranformation matrix
-    M = cv2.getPerspectiveTransform(icorners, ocorners)
+    # Ensure width and height are positive
+    width = abs(width)
+    height = abs(height)
 
-    # Do perspective
-    warped = cv2.warpPerspective(image, M, (width, height))
+    # Define the output corners
+    ocorners = np.array([[0, 0], [width, 0], [width, height], [
+                        0, height]], dtype="float32")
 
-    # Write results
+    # Compute the perspective transform matrix
+    M = cv2.getPerspectiveTransform(sorted_corners, ocorners)
+
+    # Apply the perspective warp
+    warped_image = cv2.warpPerspective(image, M, (width, height))
+
+    # Write the results
     cv2.imwrite("temp/efile_thresh.jpg", threshold_image)
-    cv2.imwrite("temp/efile_morph.jpg", morph)
-    cv2.imwrite("temp/efile_polygon.jpg", polygon)
-    cv2.imwrite("temp/efile_warped.jpg", warped)
+    cv2.imwrite("temp/efile_morph.jpg", morphology_image)
+    cv2.imwrite("temp/efile_polygon.jpg", polygon_image)
+    cv2.imwrite("temp/efile_warped.jpg", warped_image)
+
+
+def __order_points(points: np.ndarray) -> np.ndarray:
+    """
+    Order the points in the contour in: top-left, top-right, bottom-right, bottom-left.
+
+    Parameters:
+    - points: np.ndarray
+        Array of points in the contour
+
+    Returns:
+    - rect: np.ndarray
+        Array of points in the contour in the correct order
+    """
+
+    # Convert to numpy array for easier manipulation
+    rect = np.zeros((4, 2), dtype="float32")
+
+    s = points.sum(axis=1)
+    rect[0] = points[np.argmin(s)]  # Top-left
+    rect[2] = points[np.argmax(s)]  # Bottom-right
+
+    diff = np.diff(points, axis=1)
+    rect[1] = points[np.argmin(diff)]  # Top-right
+    rect[3] = points[np.argmax(diff)]  # Bottom-left
+
+    return rect
 
 
 if __name__ == "__main__":
-    input_image = cv2.imread("./dataset/angled_receipt_2.jpeg")
+    input_image = cv2.imread("./dataset/finger_receipt_1.jpeg")
 
     fix_perspective(input_image)
