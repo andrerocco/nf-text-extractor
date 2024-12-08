@@ -1,85 +1,6 @@
 import cv2
 import numpy as np
-
-
-def fix_perspective(image: np.ndarray) -> np.ndarray:
-    gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    blur_image = cv2.GaussianBlur(gray_image, (3, 3), 0)
-    threshold_image = cv2.threshold(
-        blur_image, 0, 255, cv2.THRESH_BINARY+cv2.THRESH_OTSU)[1]
-
-    # Apply morphology
-    kernel = np.ones((5, 5), np.uint8)
-    morphology_image = cv2.morphologyEx(
-        threshold_image, cv2.MORPH_CLOSE, kernel)
-    morphology_image = cv2.morphologyEx(
-        morphology_image, cv2.MORPH_OPEN, kernel)
-
-    # Get largest contour
-    contours = cv2.findContours(
-        morphology_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    contours = contours[0] if len(contours) == 2 else contours[1]
-    area_thresh = 0
-    for c in contours:
-        area = cv2.contourArea(c)
-        if area > area_thresh:
-            area_thresh = area
-            big_contour = c
-
-    # Draw white filled largest contour on black just as a check to see it got the correct region
-    page = np.zeros_like(image)
-    cv2.drawContours(page, [big_contour], 0, (255, 255, 255), -1)
-
-    # Get perimeter and approximate a polygon
-    peri = cv2.arcLength(big_contour, True)
-    corners = cv2.approxPolyDP(big_contour, 0.04 * peri, True)
-
-    # Draw polygon on input image from detected corners
-    polygon_image = image.copy()
-    cv2.polylines(polygon_image, [corners], True, (0, 0, 255), 1, cv2.LINE_AA)
-    # cv2.drawContours(page,[corners],0,(0,0,255),1)
-
-    print(len(corners))
-    print(corners)
-
-    # Reformat corners to a 2D array and sort them
-    icorners = np.array([corner[0]
-                        for corner in corners])  # Extract (x, y) pairs
-    sorted_corners = __order_points(icorners)
-
-    # Calculate width as the average of the top and bottom sides
-    # Top: distance between top-left and top-right
-    top_width = np.linalg.norm(sorted_corners[1] - sorted_corners[0])
-    # Bottom: distance between bottom-left and bottom-right
-    bottom_width = np.linalg.norm(sorted_corners[2] - sorted_corners[3])
-    width = int((top_width + bottom_width) / 2)
-
-    # Calculate height as the average of the left and right sides
-    # Left: distance between top-left and bottom-left
-    left_height = np.linalg.norm(sorted_corners[3] - sorted_corners[0])
-    # Right: distance between top-right and bottom-right
-    right_height = np.linalg.norm(sorted_corners[2] - sorted_corners[1])
-    height = int((left_height + right_height) / 2)
-
-    # Ensure width and height are positive
-    width = abs(width)
-    height = abs(height)
-
-    # Define the output corners
-    ocorners = np.array([[0, 0], [width, 0], [width, height], [
-                        0, height]], dtype="float32")
-
-    # Compute the perspective transform matrix
-    M = cv2.getPerspectiveTransform(sorted_corners, ocorners)
-
-    # Apply the perspective warp
-    warped_image = cv2.warpPerspective(image, M, (width, height))
-
-    # Write the results
-    cv2.imwrite("temp/efile_thresh.jpg", threshold_image)
-    cv2.imwrite("temp/efile_morph.jpg", morphology_image)
-    cv2.imwrite("temp/efile_polygon.jpg", polygon_image)
-    cv2.imwrite("temp/efile_warped.jpg", warped_image)
+import os
 
 
 def __order_points(points: np.ndarray) -> np.ndarray:
@@ -109,7 +30,126 @@ def __order_points(points: np.ndarray) -> np.ndarray:
     return rect
 
 
-if __name__ == "__main__":
-    input_image = cv2.imread("./dataset/finger_receipt_1.jpeg")
+def fix_perspective(image: np.ndarray, debug: bool = False) -> np.ndarray:
+    """
+    Fix the perspective of the image by applying a series of filters.
+    """
 
-    fix_perspective(input_image)
+    gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    blur_image = cv2.GaussianBlur(gray_image, (3, 3), 0)
+    threshold_image = cv2.threshold(
+        blur_image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+
+    # Apply morphology
+    kernel = np.ones((5, 5), np.uint8)
+    morph = cv2.morphologyEx(threshold_image, cv2.MORPH_CLOSE, kernel)
+    morph = cv2.morphologyEx(morph, cv2.MORPH_OPEN, kernel)
+
+    # Get largest contour
+    contours = cv2.findContours(
+        morph, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = contours[0] if len(contours) == 2 else contours[1]
+    area_thresh = 0
+    big_contour = None
+
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area > area_thresh:
+            area_thresh = area
+            big_contour = c
+
+    if big_contour is None:
+        raise ValueError("No valid contour found in the image.")
+
+    # Get perimeter and approximate a polygon
+    peri = cv2.arcLength(big_contour, True)
+    corners = cv2.approxPolyDP(big_contour, 0.04 * peri, True)
+
+    # Ensure we have at least 4 points
+    points = corners.reshape(-1, 2)
+
+    if len(points) < 4:
+        raise ValueError(
+            "Contour has fewer than 4 points, cannot perform perspective transform.")
+
+    # If more than 4 points, reduce to the 4 most extreme points
+    if len(points) > 4:
+        # Compute convex hull to reduce unnecessary points
+        hull = cv2.convexHull(points)
+        points = hull.reshape(-1, 2)
+
+        # If still more than 4 points, sort and pick the most extreme 4
+        if len(points) > 4:
+            points = __order_points(points[:4])  # Pick first 4 ordered points
+        else:
+            points = __order_points(points)
+    else:
+        points = __order_points(points)
+
+    # Now we have exactly 4 points, ordered correctly
+    ordered_corners = points
+
+    # Compute the width and height of the new image
+    width_top = np.linalg.norm(ordered_corners[1] - ordered_corners[0])
+    width_bottom = np.linalg.norm(ordered_corners[2] - ordered_corners[3])
+    max_width = int(max(width_top, width_bottom))
+
+    height_left = np.linalg.norm(ordered_corners[3] - ordered_corners[0])
+    height_right = np.linalg.norm(ordered_corners[2] - ordered_corners[1])
+    max_height = int(max(height_left, height_right))
+
+    # Define the destination points for the warp
+    destination_corners = np.array([
+        [0, 0],                    # Top-left
+        [max_width - 1, 0],        # Top-right
+        [max_width - 1, max_height - 1],  # Bottom-right
+        [0, max_height - 1]        # Bottom-left
+    ], dtype="float32")
+
+    # Compute the perspective transform matrix
+    M = cv2.getPerspectiveTransform(ordered_corners, destination_corners)
+
+    # Perform the warp
+    warped = cv2.warpPerspective(image, M, (max_width, max_height))
+
+    # Write results
+    if debug:
+        os.makedirs("temp", exist_ok=True)
+        cv2.imwrite("temp/debug_image_thresh.jpg", threshold_image)
+        cv2.imwrite("temp/debug_image_morph.jpg", morph)
+        cv2.imwrite("temp/debug_image_warped.jpg", warped)
+
+        polygon = image.copy()
+        cv2.polylines(polygon, [corners], True, (0, 0, 255), 1, cv2.LINE_AA)
+        cv2.imwrite("temp/debug_image_polygon.jpg", polygon)
+
+    return warped
+
+
+def boost_readability(image: np.ndarray) -> np.ndarray:
+    """
+    Boost the readability of the image by applying a series of filters.
+    This version connects the letters while enhancing readability.
+    """
+
+    # Denoise the image
+    # dst = cv2.fastNlMeansDenoisingColored(image, None, 10, 10, 7, 21)
+
+    # Convert to grayscale
+    gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    sharpen_image = cv2.GaussianBlur(gray_image, (0, 0), 3)
+    sharpen_image = cv2.addWeighted(gray_image, 1.5, sharpen_image, -0.5, 0)
+
+    return sharpen_image
+
+
+if __name__ == "__main__":
+    input_image = cv2.imread("./dataset/angled_small_receipt_2.jpeg")
+
+    warped_image = fix_perspective(input_image, debug=True)
+
+    cv2.imwrite("temp/final_result.jpg", warped_image)
+
+    boosted_image = boost_readability(warped_image)
+
+    cv2.imwrite("temp/final_result_boosted.jpg", boosted_image)
